@@ -105,5 +105,6 @@ Node* create_node(GameState *state, int r, int c, Node *parent) {
     node->num_children = 0;
     // Store which player made the move to get to this state
     node->player_just_moved = parent ? opponent(state->player) : BLACK;
+    omp_init_lock(&node->lock);
     return node;
 }

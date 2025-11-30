@@ -4,16 +4,9 @@
 #include <time.h>
 #include <math.h>
 #include <omp.h>
+#include "include/mcts.h"
 #include "othello.h"
 #include "mcts.h"
-
-void free_tree(Node *node) {
-    if (node == NULL) return;
-    for (int i = 0; i < node->num_children; i++)
-        free_tree(node->children[i]);
-    free(node->children);
-    free(node);
-}
 
 int get_random_move(GameState *state, int *r, int *c) {
     int moves[64][2], count = 0;
@@ -32,23 +25,24 @@ int get_random_move(GameState *state, int *r, int *c) {
     return 1;
 }
 
-int get_mcts_move(GameState *state, int simulations, int *r, int *c, int use_parallel) {
+int get_mcts_move(GameState *state, int simulations, int *r, int *c, int use_parallel, int root_parallel) {
     Node *root = create_node(state, -1, -1, NULL);
     root->player_just_moved = opponent(state->player);
     expand(root);
-    
+
     if (root->num_children == 0) {
         free_tree(root);
         return 0;
     }
-    
-    if (use_parallel) {
+
+    if (root_parallel) {
+        mcts_root_parallel_virtual_loss(root, simulations);
+    } else if (use_parallel) {
         mcts_leaf_parallel(root, simulations);
     } else {
         mcts(root, simulations);
     }
-    
-    // Choose based on HIGHEST WIN RATE
+
     Node *best = NULL;
     double best_winrate = -1.0;
     for (int i = 0; i < root->num_children; i++) {
@@ -60,12 +54,12 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c, int use_par
             }
         }
     }
-    
+
     if (best) {
         *r = best->move_row;
         *c = best->move_col;
     }
-    
+
     free_tree(root);
     return best != NULL;
 }
@@ -95,7 +89,7 @@ void benchmark_seq_vs_parallel(int mcts_sims, int num_games) {
             int r, c;
             if (state.player == mcts_player) {
                 double start = omp_get_wtime();
-                if (!get_mcts_move(&state, mcts_sims, &r, &c, 0)) break;
+                if (!get_mcts_move(&state, mcts_sims, &r, &c, 0, 0)) break;
                 seq_total_time += (omp_get_wtime() - start);
                 seq_move_count++;
             } else {
@@ -133,7 +127,7 @@ void benchmark_seq_vs_parallel(int mcts_sims, int num_games) {
             int r, c;
             if (state.player == mcts_player) {
                 double start = omp_get_wtime();
-                if (!get_mcts_move(&state, mcts_sims, &r, &c, 1)) break;
+                if (!get_mcts_move(&state, mcts_sims, &r, &c, 0, 1)) break;
                 par_total_time += (omp_get_wtime() - start);
                 par_move_count++;
             } else {
@@ -220,10 +214,10 @@ void benchmark_head_to_head(int simulations, int num_games) {
             double start = omp_get_wtime();
             
             if (state.player == seq_player) {
-                if (!get_mcts_move(&state, simulations, &r, &c, 0)) break;
+                if (!get_mcts_move(&state, simulations, &r, &c, 0, 0)) break;
                 seq_total_time += (omp_get_wtime() - start);
             } else {
-                if (!get_mcts_move(&state, simulations, &r, &c, 1)) break;
+                if (!get_mcts_move(&state, simulations, &r, &c, 0, 1)) break;
                 par_total_time += (omp_get_wtime() - start);
             }
             
@@ -278,7 +272,7 @@ void benchmark_thread_scaling(int simulations, int num_games) {
                 
                 int r, c;
                 double start = omp_get_wtime();
-                if (!get_mcts_move(&state, simulations, &r, &c, 1)) break;
+                if (!get_mcts_move(&state, simulations, &r, &c, 0, 1)) break;
                 total_time += (omp_get_wtime() - start);
                 move_count++;
                 
@@ -298,69 +292,87 @@ void benchmark_thread_scaling(int simulations, int num_games) {
     }
 }
 
-// Benchmark 4: Simulation Scaling Comparison
 void benchmark_simulation_scaling(int num_games) {
-    printf("\n=== Benchmark 4: Simulation Scaling (Sequential vs Parallel, %d games each) ===\n",
-           num_games);
+    printf("\n=== Benchmark 4: Simulation Scaling + GPU vs Random (%d games each) ===\n", num_games);
 
     int sim_counts[] = {500, 1000, 2000, 5000};
     int num_configs = sizeof(sim_counts) / sizeof(sim_counts[0]);
 
-    printf("\n%-8s | %-15s | %-15s | %-10s\n", "Sims", "Seq Time", "Par Time", "Speedup");
-    printf("---------|-----------------|-----------------|------------\n");
+    printf("\n%-8s | %-15s | %-20s | %-15s | %-20s | %-15s | %-20s\n",
+           "Sims", "Seq Time", "Seq Wins", "CPU Time", "CPU Wins", "Root Time", "Root Wins");
+    printf("---------|-----------------|--------------------|-----------------|--------------------|-----------------|--------------------\n");
 
     for (int cfg = 0; cfg < num_configs; cfg++) {
         int sims = sim_counts[cfg];
-        
-        // Sequential
-        double seq_time = 0.0;
-        int seq_moves = 0;
+
+        double seq_time = 0.0, par_time = 0.0, gpu_time = 0.0;
+        int seq_moves = 0, par_moves = 0, gpu_moves = 0;
+        int seq_wins = 0, par_wins = 0, gpu_wins = 0;
+
         for (int game = 0; game < num_games; game++) {
-            GameState state;
-            init_board(&state);
-            
+            GameState state_seq, state_par, state_gpu;
+            init_board(&state_seq);
+            init_board(&state_par);
+            init_board(&state_gpu);
+
+            int seq_player = (game % 2 == 0) ? BLACK : WHITE;
+            int par_player = seq_player;
+            int gpu_player = seq_player;
+
             while (1) {
-                if (!has_valid_moves(&state)) {
-                    state.player = opponent(state.player);
-                    if (!has_valid_moves(&state)) break;
-                }
-                
+                // Check if game over
+                if (!has_valid_moves(&state_seq) && !has_valid_moves(&state_par) && !has_valid_moves(&state_gpu)) break;
+
                 int r, c;
-                double start = omp_get_wtime();
-                if (!get_mcts_move(&state, sims, &r, &c, 0)) break;
-                seq_time += (omp_get_wtime() - start);
+
+                // Sequential MCTS vs Random
+                if (state_seq.player == seq_player) {
+                    double start = omp_get_wtime();
+                    if (!get_mcts_move(&state_seq, sims, &r, &c, 0, 0)) break;
+                    seq_time += (omp_get_wtime() - start);
+                } else {
+                    if (!get_random_move(&state_seq, &r, &c)) break;
+                }
                 seq_moves++;
-                make_move(&state, r, c);
-            }
-        }
-        
-        // Parallel
-        double par_time = 0.0;
-        int par_moves = 0;
-        for (int game = 0; game < num_games; game++) {
-            GameState state;
-            init_board(&state);
-            
-            while (1) {
-                if (!has_valid_moves(&state)) {
-                    state.player = opponent(state.player);
-                    if (!has_valid_moves(&state)) break;
+                make_move(&state_seq, r, c);
+
+                // Parallel CPU MCTS vs Random
+                if (state_par.player == par_player) {
+                    double start = omp_get_wtime();
+                    if (!get_mcts_move(&state_par, sims, &r, &c, 1, 0)) break;
+                    par_time += (omp_get_wtime() - start);
+                } else {
+                    if (!get_random_move(&state_par, &r, &c)) break;
                 }
-                
-                int r, c;
-                double start = omp_get_wtime();
-                if (!get_mcts_move(&state, sims, &r, &c, 1)) break;
-                par_time += (omp_get_wtime() - start);
                 par_moves++;
-                make_move(&state, r, c);
+                make_move(&state_par, r, c);
+
+                // GPU MCTS vs Random
+                if (state_gpu.player == gpu_player) {
+                    double start = omp_get_wtime();
+                    if (!get_mcts_move(&state_gpu, sims, &r, &c, 0, 1)) break;
+                    gpu_time += (omp_get_wtime() - start);
+                } else {
+                    if (!get_random_move(&state_gpu, &r, &c)) break;
+                }
+                gpu_moves++;
+                make_move(&state_gpu, r, c);
             }
+
+            // Count wins for each MCTS
+            if (get_winner(&state_seq) == seq_player) seq_wins++;
+            if (get_winner(&state_par) == par_player) par_wins++;
+            if (get_winner(&state_gpu) == gpu_player) gpu_wins++;
         }
-        
-        printf("%-8d | %10.4f s/mv | %10.4f s/mv | %.2fx\n",
-               sims, seq_time / seq_moves, par_time / par_moves,
-               seq_time / par_time);
+
+        printf("%-8d | %10.4f | %3d/%-15d | %10.4f | %3d/%-15d | %10.4f | %3d/%-15d\n",
+               sims,
+               seq_time / seq_moves, seq_wins, num_games,
+               par_time / par_moves, par_wins, num_games,
+               gpu_time / gpu_moves, gpu_wins, num_games);
     }
 }
+
 
 int main(int argc, char *argv[]) {
     srand(time(NULL));
@@ -373,10 +385,10 @@ int main(int argc, char *argv[]) {
     
     if (argc > 1 && strcmp(argv[1], "quick") == 0) {
         printf("\n[QUICK MODE - Fast testing]\n");
-        benchmark_seq_vs_parallel(1000, 20);
-        benchmark_head_to_head(1000, 10);
-        benchmark_thread_scaling(1000, 5);
-        benchmark_simulation_scaling(5);
+        // benchmark_seq_vs_parallel(1000, 20);
+        // benchmark_head_to_head(1000, 10);
+        // benchmark_thread_scaling(1000, 5);
+        benchmark_simulation_scaling(20);
     } else if (argc > 1 && strcmp(argv[1], "full") == 0) {
         printf("\n[FULL MODE - Comprehensive testing]\n");
         benchmark_seq_vs_parallel(2000, 50);

@@ -1,7 +1,7 @@
 # Compiler and flags
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -std=c11 -Iinclude
-LDFLAGS = -lm
+CFLAGS = -Wall -Wextra -O2 -std=c11 -Iinclude -fopenmp   # <- add -fopenmp here
+LDFLAGS = -lm -fopenmp                                     # <- and here for linking
 
 # Directories
 SRC_DIR = src
@@ -59,7 +59,7 @@ run-full: $(TARGET)
 	./$(TARGET) full
 
 # Debug build (with debug symbols and no optimization)
-debug: CFLAGS = -Wall -Wextra -g -O0 -std=c11 -Iinclude
+debug: CFLAGS = -Wall -Wextra -g -O0 -std=c11 -Iinclude -fopenmp
 debug: clean all
 
 # Phony targets

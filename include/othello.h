@@ -6,6 +6,8 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <omp.h>   // add for parallelism
+
 
 #define SIZE 8
 #define EMPTY 0
@@ -27,6 +29,7 @@ typedef struct Node {
     struct Node **children;
     int num_children;
     int player_just_moved;  // Track which player made this move
+    omp_lock_t lock;  // ← ADD THIS LINE FOR PARALLEL VERSION
 } Node;
 
 int is_valid(int r, int c);

@@ -1,4 +1,8 @@
+#include <omp.h>
+#include <stdint.h>
 #include "mcts.h"
+
+#define ROLLOUTS 20
 
 double ucb1(Node *node) {
     if (node->visits == 0) return INFINITY;
@@ -44,7 +48,8 @@ void expand(Node *node) {
     }
 }
 
-double simulate(GameState *state, int original_player) {
+
+double simulate(GameState *state, int original_player, unsigned int *seed, int include_seed) {
     GameState sim = *state;
     
     while (1) {
@@ -63,7 +68,11 @@ double simulate(GameState *state, int original_player) {
                 }
         
         if (count == 0) break;
-        int idx = rand() % count;
+        int idx;
+        if (include_seed)
+            idx = rand_r(seed) % count;
+        else    
+            idx = rand() % count;
         make_move(&sim, moves[idx][0], moves[idx][1]);
     }
     
@@ -79,6 +88,42 @@ double simulate(GameState *state, int original_player) {
         if (white > black) return 1.0;
         else if (white < black) return 0.0;
         else return 0.5;
+    }
+}
+
+/*void backpropagate_rollouts(Node *node, double result, int visits) {
+    // result is total wins from perspective of the player at the LEAF where simulation started
+    // We need to propagate this up, flipping perspective at each level
+    
+    while (node != NULL) {
+        node->visits += visits;
+        node->wins += result;
+        
+        // Flip the result for the parent (opponent's perspective)
+        result = visits - result;
+        
+        node = node->parent;
+    }
+}*/
+
+void backpropagate_rollouts(Node *node, double total_result, int rollouts, int original_player) {
+    if (node == NULL) return;
+    double wins_from_leaf_player = total_result;      // wins as seen from the leaf's player (sum of 0..1)
+    int r = rollouts;
+
+    // Walk up the tree, flipping perspective at each step.
+    while (node != NULL) {
+        node->visits += r;
+
+        if (node->player_just_moved == original_player) {
+            node->wins += wins_from_leaf_player;
+        } else {
+            node->wins += (double)r - wins_from_leaf_player;
+        }
+
+        // Flip perspective for the parent node:
+        wins_from_leaf_player = (double)r - wins_from_leaf_player;
+        node = node->parent;
     }
 }
 
@@ -120,9 +165,62 @@ void mcts(Node *root, int iterations) {
         }
         
         // Simulation - the result is from the perspective of the current player
-        double result = simulate(&node->state, node->state.player);
+        double result = simulate(&node->state, node->state.player, 0, 0);
         
         // Backpropagation
         backpropagate(node, result);
     }
+}
+
+
+void mcts_leaf_parallel(Node *root, int iterations) {
+    if (root == NULL) return;
+
+    int groups = iterations / ROLLOUTS;
+    if (groups == 0) groups = 1;
+
+    for (int g = 0; g < groups; g++) {
+        Node *node = root;
+
+        // Selection - single-threaded (same as sequential)
+        while (node->num_children > 0) {
+            node = select_child(node);
+        }
+
+        // Expansion - single-threaded
+        if (node->visits > 0 && has_valid_moves(&node->state)) {
+            expand(node);
+            if (node->num_children > 0) {
+                node = node->children[rand() % node->num_children];
+            }
+        }
+        GameState base_state = node->state;
+        int original_player = base_state.player;
+        unsigned int seed_base = (unsigned int)rand() ^ (unsigned int)time(NULL) ^ (unsigned int)(g * 0x9e3779b9u);
+        #pragma omp parallel for schedule(dynamic) firstprivate(base_state, original_player, seed_base)
+        for (int r = 0; r < ROLLOUTS; r++) {
+            unsigned int thread_seed = seed_base ^ (unsigned int)(r * 0x9e3779b9u) ^ (unsigned int)omp_get_thread_num();
+            GameState state_copy = base_state;
+
+            double result = simulate(&state_copy, original_player, &thread_seed, 1); // result in [0,1] w.r.t. original_player
+            Node *n = node;
+            while (n != NULL) {
+                double add;
+                if (n->player_just_moved == original_player) {
+                    add = result;           // wins for player_just_moved
+                } else {
+                    add = 1.0 - result;     // opponent's wins
+                }
+
+                // Atomic updates to avoid races (int visits, double wins)
+                #pragma omp atomic
+                n->visits += 1;
+
+                #pragma omp atomic
+                n->wins += add;
+
+                n = n->parent;
+            }
+        } 
+    } 
 }

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <omp.h>
 #include "othello.h"
 #include "mcts.h"
 
@@ -31,7 +32,7 @@ int get_random_move(GameState *state, int *r, int *c) {
     return 1;
 }
 
-int get_mcts_move(GameState *state, int simulations, int *r, int *c) {
+int get_mcts_move(GameState *state, int simulations, int *r, int *c, int use_parallel) {
     Node *root = create_node(state, -1, -1, NULL);
     root->player_just_moved = opponent(state->player);
     expand(root);
@@ -41,9 +42,13 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c) {
         return 0;
     }
     
-    mcts(root, simulations);
+    if (use_parallel) {
+        mcts_leaf_parallel(root, simulations);
+    } else {
+        mcts(root, simulations);
+    }
     
-    // Choose based on HIGHEST WIN RATE, not just most visits
+    // Choose based on HIGHEST WIN RATE
     Node *best = NULL;
     double best_winrate = -1.0;
     for (int i = 0; i < root->num_children; i++) {
@@ -65,17 +70,20 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c) {
     return best != NULL;
 }
 
-// Benchmark 1: MCTS vs Random Player
-void benchmark_vs_random(int mcts_sims, int num_games) {
-    printf("\n=== Benchmark 1: MCTS(%d) vs Random (%d games) ===\n", mcts_sims, num_games);
+// Benchmark 1: Sequential vs Parallel Performance
+void benchmark_seq_vs_parallel(int mcts_sims, int num_games) {
+    printf("\n=== Benchmark 1: Sequential vs Parallel (%d sims, %d games) ===\n", 
+           mcts_sims, num_games);
     
-    int mcts_wins = 0, random_wins = 0, draws = 0;
-    int total_mcts_score = 0, total_random_score = 0;
+    // Test Sequential
+    printf("\nTesting SEQUENTIAL MCTS...\n");
+    int seq_wins = 0, seq_draws = 0;
+    double seq_total_time = 0.0;
+    int seq_move_count = 0;
     
     for (int game = 0; game < num_games; game++) {
         GameState state;
         init_board(&state);
-        
         int mcts_player = (game % 2 == 0) ? BLACK : WHITE;
         
         while (1) {
@@ -86,106 +94,35 @@ void benchmark_vs_random(int mcts_sims, int num_games) {
             
             int r, c;
             if (state.player == mcts_player) {
-                if (!get_mcts_move(&state, mcts_sims, &r, &c)) break;
+                double start = omp_get_wtime();
+                if (!get_mcts_move(&state, mcts_sims, &r, &c, 0)) break;
+                seq_total_time += (omp_get_wtime() - start);
+                seq_move_count++;
             } else {
                 if (!get_random_move(&state, &r, &c)) break;
             }
             make_move(&state, r, c);
         }
         
-        int black_score, white_score;
-        get_score(&state, &black_score, &white_score);
-        
-        int mcts_score = (mcts_player == BLACK) ? black_score : white_score;
-        int random_score = (mcts_player == BLACK) ? white_score : black_score;
-        
-        total_mcts_score += mcts_score;
-        total_random_score += random_score;
-        
         int winner = get_winner(&state);
-        if (winner == mcts_player) mcts_wins++;
-        else if (winner == opponent(mcts_player)) random_wins++;
-        else draws++;
+        if (winner == mcts_player) seq_wins++;
+        else if (winner == 0) seq_draws++;
         
         if ((game + 1) % 10 == 0) {
-            printf("  Progress: %d/%d games completed\n", game + 1, num_games);
+            printf("  Progress: %d/%d games\n", game + 1, num_games);
         }
     }
     
-    printf("\nResults:\n");
-    printf("  MCTS Wins:   %d (%.1f%%)\n", mcts_wins, 100.0 * mcts_wins / num_games);
-    printf("  Random Wins: %d (%.1f%%)\n", random_wins, 100.0 * random_wins / num_games);
-    printf("  Draws:       %d (%.1f%%)\n", draws, 100.0 * draws / num_games);
-    printf("  Avg MCTS Score:   %.1f\n", (double)total_mcts_score / num_games);
-    printf("  Avg Random Score: %.1f\n", (double)total_random_score / num_games);
-}
-
-// Benchmark 2: MCTS vs Random, Scaling with Number of Simulations
-void benchmark_simulation_scaling(int num_games) {
-    printf("\n=== Benchmark 2: Simulation Count Scaling (%d games each) ===\n",
-           num_games);
-
-    int sim_counts[] = {100, 500, 1000, 2000, 5000};
-    int num_configs = sizeof(sim_counts) / sizeof(sim_counts[0]);
-
-    for (int cfg = 0; cfg < num_configs; cfg++) {
-        int sims = sim_counts[cfg];
-        int wins = 0;
-        int draws = 0;
-        clock_t total_time = 0;
-
-        for (int game = 0; game < num_games; game++) {
-            GameState state;
-            init_board(&state);
-
-            int mcts_player = BLACK;  // ALWAYS MCTS as Black
-            int r, c;
-
-            while (1) {
-                if (!has_valid_moves(&state)) {
-                    state.player = opponent(state.player);
-                    if (!has_valid_moves(&state)) break;
-                }
-
-                clock_t start = clock();
-
-                if (state.player == mcts_player) {
-                    if (!get_mcts_move(&state, sims, &r, &c)) break;
-                } else {
-                    if (!get_random_move(&state, &r, &c)) break;
-                }
-
-                total_time += (clock() - start);
-                make_move(&state, r, c);
-            }
-
-            int winner = get_winner(&state);
-            if (winner == mcts_player) wins++;
-            else if (winner == 0) draws++;
-        }
-
-        double avg_time = (double)total_time / CLOCKS_PER_SEC / num_games;
-        printf("  %5d sims: Win rate vs random = %.1f%%, Draws = %.1f%%, Avg time/game = %.3fs\n",
-               sims,
-               100.0 * wins / num_games,
-               100.0 * draws / num_games,
-               avg_time);
-    }
-}
-
-
-// Benchmark 3: MCTS vs MCTS with different strengths
-void benchmark_mcts_vs_mcts(int weak_sims, int strong_sims, int num_games) {
-    printf("\n=== Benchmark 3: MCTS(%d) vs MCTS(%d) (%d games) ===\n", 
-           weak_sims, strong_sims, num_games);
-    
-    int weak_wins = 0, strong_wins = 0, draws = 0;
+    // Test Parallel
+    printf("\nTesting PARALLEL MCTS...\n");
+    int par_wins = 0, par_draws = 0;
+    double par_total_time = 0.0;
+    int par_move_count = 0;
     
     for (int game = 0; game < num_games; game++) {
         GameState state;
         init_board(&state);
-        
-        int weak_player = (game % 2 == 0) ? BLACK : WHITE;
+        int mcts_player = (game % 2 == 0) ? BLACK : WHITE;
         
         while (1) {
             if (!has_valid_moves(&state)) {
@@ -194,115 +131,274 @@ void benchmark_mcts_vs_mcts(int weak_sims, int strong_sims, int num_games) {
             }
             
             int r, c;
-            int sims = (state.player == weak_player) ? weak_sims : strong_sims;
-            if (!get_mcts_move(&state, sims, &r, &c)) break;
+            if (state.player == mcts_player) {
+                double start = omp_get_wtime();
+                if (!get_mcts_move(&state, mcts_sims, &r, &c, 1)) break;
+                par_total_time += (omp_get_wtime() - start);
+                par_move_count++;
+            } else {
+                if (!get_random_move(&state, &r, &c)) break;
+            }
             make_move(&state, r, c);
         }
         
         int winner = get_winner(&state);
-        if (winner == weak_player) weak_wins++;
-        else if (winner == opponent(weak_player)) strong_wins++;
+        if (winner == mcts_player) par_wins++;
+        else if (winner == 0) par_draws++;
+        
+        if ((game + 1) % 10 == 0) {
+            printf("  Progress: %d/%d games\n", game + 1, num_games);
+        }
+    }
+    
+    // Compare Results
+    printf("\n╔════════════════════════════════════════════════╗\n");
+    printf("║            PERFORMANCE COMPARISON              ║\n");
+    printf("╚════════════════════════════════════════════════╝\n");
+    printf("\nQuality (vs Random Player):\n");
+    printf("  Sequential MCTS:\n");
+    printf("    Wins:  %3d (%.1f%%)\n", seq_wins, 100.0 * seq_wins / num_games);
+    printf("    Draws: %3d (%.1f%%)\n", seq_draws, 100.0 * seq_draws / num_games);
+    printf("    Loses: %3d (%.1f%%)\n", num_games - seq_wins - seq_draws, 
+           100.0 * (num_games - seq_wins - seq_draws) / num_games);
+    
+    printf("  Parallel MCTS:\n");
+    printf("    Wins:  %3d (%.1f%%)\n", par_wins, 100.0 * par_wins / num_games);
+    printf("    Draws: %3d (%.1f%%)\n", par_draws, 100.0 * par_draws / num_games);
+    printf("    Loses: %3d (%.1f%%)\n", num_games - par_wins - par_draws,
+           100.0 * (num_games - par_wins - par_draws) / num_games);
+    
+    printf("\nSpeed Performance:\n");
+    printf("  Sequential: %.4f s/move | Total: %.2f s | %d moves\n", 
+           seq_total_time / seq_move_count, seq_total_time, seq_move_count);
+    printf("  Parallel:   %.4f s/move | Total: %.2f s | %d moves\n",
+           par_total_time / par_move_count, par_total_time, par_move_count);
+    printf("  ⚡ SPEEDUP: %.2fx faster\n", seq_total_time / par_total_time);
+    
+    printf("\nQuality Assessment:\n");
+    double quality_diff = fabs((100.0 * seq_wins / num_games) - (100.0 * par_wins / num_games));
+    if (quality_diff < 5.0) {
+        printf("  ✓ Win rates are similar (%.1f%% difference)\n", quality_diff);
+    } else {
+        printf("  ⚠ Win rates differ significantly (%.1f%% difference)\n", quality_diff);
+    }
+    
+    printf("\nSpeed Assessment:\n");
+    double speedup = seq_total_time / par_total_time;
+    if (speedup > 3.0) {
+        printf("  ✓ Excellent speedup (%.1fx)\n", speedup);
+    } else if (speedup > 1.5) {
+        printf("  ✓ Good speedup (%.1fx)\n", speedup);
+    } else {
+        printf("  ⚠ Limited speedup (%.1fx) - may need tuning\n", speedup);
+    }
+}
+
+// Benchmark 2: Head-to-Head Sequential vs Parallel
+void benchmark_head_to_head(int simulations, int num_games) {
+    printf("\n=== Benchmark 2: Sequential vs Parallel Head-to-Head (%d sims, %d games) ===\n",
+           simulations, num_games);
+    
+    int seq_wins = 0, par_wins = 0, draws = 0;
+    double seq_total_time = 0.0, par_total_time = 0.0;
+    
+    for (int game = 0; game < num_games; game++) {
+        GameState state;
+        init_board(&state);
+        
+        // Alternate who plays first
+        int seq_player = (game % 2 == 0) ? BLACK : WHITE;
+        int par_player = opponent(seq_player);
+        
+        while (1) {
+            if (!has_valid_moves(&state)) {
+                state.player = opponent(state.player);
+                if (!has_valid_moves(&state)) break;
+            }
+            
+            int r, c;
+            double start = omp_get_wtime();
+            
+            if (state.player == seq_player) {
+                if (!get_mcts_move(&state, simulations, &r, &c, 0)) break;
+                seq_total_time += (omp_get_wtime() - start);
+            } else {
+                if (!get_mcts_move(&state, simulations, &r, &c, 1)) break;
+                par_total_time += (omp_get_wtime() - start);
+            }
+            
+            make_move(&state, r, c);
+        }
+        
+        int winner = get_winner(&state);
+        if (winner == seq_player) seq_wins++;
+        else if (winner == par_player) par_wins++;
         else draws++;
         
         if ((game + 1) % 5 == 0) {
-            printf("  Progress: %d/%d games completed\n", game + 1, num_games);
+            printf("  Progress: %d/%d games\n", game + 1, num_games);
         }
     }
     
     printf("\nResults:\n");
-    printf("  Weak MCTS Wins:   %d (%.1f%%)\n", weak_wins, 100.0 * weak_wins / num_games);
-    printf("  Strong MCTS Wins: %d (%.1f%%)\n", strong_wins, 100.0 * strong_wins / num_games);
-    printf("  Draws:            %d (%.1f%%)\n", draws, 100.0 * draws / num_games);
+    printf("  Sequential Wins: %d (%.1f%%)\n", seq_wins, 100.0 * seq_wins / num_games);
+    printf("  Parallel Wins:   %d (%.1f%%)\n", par_wins, 100.0 * par_wins / num_games);
+    printf("  Draws:           %d (%.1f%%)\n", draws, 100.0 * draws / num_games);
+    printf("\nTiming:\n");
+    printf("  Sequential Avg: %.4f s/move\n", seq_total_time / (num_games * 30));
+    printf("  Parallel Avg:   %.4f s/move\n", par_total_time / (num_games * 30));
+    printf("  Speedup: %.2fx\n", seq_total_time / par_total_time);
 }
 
-// Benchmark 4: Move quality consistency
-void benchmark_move_consistency(int simulations, int trials) {
-    printf("\n=== Benchmark 4: Move Consistency (%d trials with %d sims) ===\n",
-           trials, simulations);
+// Benchmark 3: Thread Scaling
+void benchmark_thread_scaling(int simulations, int num_games) {
+    printf("\n=== Benchmark 3: Thread Scaling (%d sims, %d games) ===\n",
+           simulations, num_games);
     
-    GameState state;
-    init_board(&state);
+    int thread_counts[] = {1, 2, 4, 8};
+    int num_configs = sizeof(thread_counts) / sizeof(thread_counts[0]);
+    double baseline_time = 0.0;
     
-    // Make a few moves to get to mid-game
-    int setup_moves[][2] = {{2,3}, {2,2}, {2,4}};
-    for (int i = 0; i < 3; i++) {
-        if (is_valid_move(&state, setup_moves[i][0], setup_moves[i][1])) {
-            make_move(&state, setup_moves[i][0], setup_moves[i][1]);
-        }
-    }
-    
-    int move_counts[SIZE][SIZE] = {0};
-    
-    for (int trial = 0; trial < trials; trial++) {
-        int r, c;
-        if (get_mcts_move(&state, simulations, &r, &c)) {
-            move_counts[r][c]++;
-        }
-    }
-    
-    printf("\nMove distribution (should heavily favor best move):\n");
-    int max_count = 0, total = 0;
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            if (move_counts[i][j] > max_count) max_count = move_counts[i][j];
-            total += move_counts[i][j];
-        }
-    }
-    
-    for (int i = 0; i < SIZE; i++) {
-        for (int j = 0; j < SIZE; j++) {
-            if (move_counts[i][j] > 0) {
-                printf("  Move (%d,%d): %3d times (%.1f%%)\n", 
-                       i, j, move_counts[i][j], 100.0 * move_counts[i][j] / total);
+    for (int cfg = 0; cfg < num_configs; cfg++) {
+        int threads = thread_counts[cfg];
+        omp_set_num_threads(threads);
+        
+        double total_time = 0.0;
+        int move_count = 0;
+        
+        for (int game = 0; game < num_games; game++) {
+            GameState state;
+            init_board(&state);
+            
+            while (1) {
+                if (!has_valid_moves(&state)) {
+                    state.player = opponent(state.player);
+                    if (!has_valid_moves(&state)) break;
+                }
+                
+                int r, c;
+                double start = omp_get_wtime();
+                if (!get_mcts_move(&state, simulations, &r, &c, 1)) break;
+                total_time += (omp_get_wtime() - start);
+                move_count++;
+                
+                make_move(&state, r, c);
             }
         }
+        
+        double avg_time = total_time / move_count;
+        if (cfg == 0) baseline_time = avg_time;
+        
+        double speedup = baseline_time / avg_time;
+        double efficiency = (speedup / threads) * 100.0;
+        
+        printf("  %d thread%s: %.4f s/move | Speedup: %.2fx | Efficiency: %.1f%%\n",
+               threads, threads > 1 ? "s" : " ",
+               avg_time, speedup, efficiency);
     }
-    
-    double consistency = 100.0 * max_count / total;
-    printf("\nConsistency score: %.1f%% (higher is better)\n", consistency);
-    if (consistency > 80) printf("  ✓ Excellent - AI is very confident\n");
-    else if (consistency > 60) printf("  ✓ Good - AI has clear preference\n");
-    else if (consistency > 40) printf("  ~ Fair - Some variation in choices\n");
-    else printf("  ✗ Poor - AI is too random\n");
+}
+
+// Benchmark 4: Simulation Scaling Comparison
+void benchmark_simulation_scaling(int num_games) {
+    printf("\n=== Benchmark 4: Simulation Scaling (Sequential vs Parallel, %d games each) ===\n",
+           num_games);
+
+    int sim_counts[] = {500, 1000, 2000, 5000};
+    int num_configs = sizeof(sim_counts) / sizeof(sim_counts[0]);
+
+    printf("\n%-8s | %-15s | %-15s | %-10s\n", "Sims", "Seq Time", "Par Time", "Speedup");
+    printf("---------|-----------------|-----------------|------------\n");
+
+    for (int cfg = 0; cfg < num_configs; cfg++) {
+        int sims = sim_counts[cfg];
+        
+        // Sequential
+        double seq_time = 0.0;
+        int seq_moves = 0;
+        for (int game = 0; game < num_games; game++) {
+            GameState state;
+            init_board(&state);
+            
+            while (1) {
+                if (!has_valid_moves(&state)) {
+                    state.player = opponent(state.player);
+                    if (!has_valid_moves(&state)) break;
+                }
+                
+                int r, c;
+                double start = omp_get_wtime();
+                if (!get_mcts_move(&state, sims, &r, &c, 0)) break;
+                seq_time += (omp_get_wtime() - start);
+                seq_moves++;
+                make_move(&state, r, c);
+            }
+        }
+        
+        // Parallel
+        double par_time = 0.0;
+        int par_moves = 0;
+        for (int game = 0; game < num_games; game++) {
+            GameState state;
+            init_board(&state);
+            
+            while (1) {
+                if (!has_valid_moves(&state)) {
+                    state.player = opponent(state.player);
+                    if (!has_valid_moves(&state)) break;
+                }
+                
+                int r, c;
+                double start = omp_get_wtime();
+                if (!get_mcts_move(&state, sims, &r, &c, 1)) break;
+                par_time += (omp_get_wtime() - start);
+                par_moves++;
+                make_move(&state, r, c);
+            }
+        }
+        
+        printf("%-8d | %10.4f s/mv | %10.4f s/mv | %.2fx\n",
+               sims, seq_time / seq_moves, par_time / par_moves,
+               seq_time / par_time);
+    }
 }
 
 int main(int argc, char *argv[]) {
     srand(time(NULL));
     
     printf("╔════════════════════════════════════════════════╗\n");
-    printf("║     Othello MCTS Benchmark Suite              ║\n");
+    printf("║  Othello MCTS: Sequential vs Parallel         ║\n");
     printf("╚════════════════════════════════════════════════╝\n");
+    printf("\nSystem Info:\n");
+    printf("  Max OpenMP Threads: %d\n", omp_get_max_threads());
     
     if (argc > 1 && strcmp(argv[1], "quick") == 0) {
-        printf("\n[QUICK MODE - Reduced test counts]\n");
-        benchmark_vs_random(1000, 20);
-        benchmark_simulation_scaling(10);
-        benchmark_mcts_vs_mcts(500, 2000, 10);
-        benchmark_move_consistency(1000, 20);
+        printf("\n[QUICK MODE - Fast testing]\n");
+        benchmark_seq_vs_parallel(1000, 20);
+        benchmark_head_to_head(1000, 10);
+        benchmark_thread_scaling(1000, 5);
+        benchmark_simulation_scaling(5);
     } else if (argc > 1 && strcmp(argv[1], "full") == 0) {
         printf("\n[FULL MODE - Comprehensive testing]\n");
-        benchmark_vs_random(1000, 100);
-        benchmark_vs_random(5000, 50);
-        benchmark_simulation_scaling(20);
-        benchmark_mcts_vs_mcts(500, 2000, 20);
-        benchmark_mcts_vs_mcts(1000, 5000, 20);
-        benchmark_move_consistency(5000, 50);
+        benchmark_seq_vs_parallel(2000, 50);
+        benchmark_head_to_head(2000, 30);
+        benchmark_thread_scaling(2000, 15);
+        benchmark_simulation_scaling(15);
     } else {
         printf("\n[STANDARD MODE]\n");
-        benchmark_vs_random(1000, 50);
-        benchmark_simulation_scaling(15);
-        benchmark_mcts_vs_mcts(500, 2000, 15);
-        benchmark_move_consistency(1000, 30);
+        benchmark_seq_vs_parallel(1000, 30);
+        benchmark_head_to_head(1000, 20);
+        benchmark_thread_scaling(1000, 10);
+        benchmark_simulation_scaling(10);
     }
     
     printf("\n╔════════════════════════════════════════════════╗\n");
-    printf("║     Benchmark Complete!                        ║\n");
+    printf("║  Benchmark Complete!                           ║\n");
     printf("╚════════════════════════════════════════════════╝\n");
-    printf("\nInterpretation Guide:\n");
-    printf("• MCTS should beat random >80%% (shows it's learning)\n");
-    printf("• More simulations = higher win rate (shows scaling)\n");
-    printf("• Strong MCTS should dominate weak MCTS\n");
-    printf("• High consistency = confident, quality decisions\n");
+    printf("\nKey Takeaways:\n");
+    printf("• Parallel should maintain similar win rates to sequential\n");
+    printf("• Expect 2-8x speedup depending on CPU cores\n");
+    printf("• Thread scaling shows parallel efficiency\n");
+    printf("• More simulations = better decisions but slower\n");
     
     return 0;
 }

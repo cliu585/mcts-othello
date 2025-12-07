@@ -40,7 +40,7 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c, int use_par
     } else if (use_parallel) {
         mcts_leaf_parallel(root, simulations);
     } else {
-        mcts(root, simulations);
+        mcts_sequential(root, simulations);
     }
 
     Node *best = NULL;
@@ -385,9 +385,9 @@ int main(int argc, char *argv[]) {
     
     if (argc > 1 && strcmp(argv[1], "quick") == 0) {
         printf("\n[QUICK MODE - Fast testing]\n");
-        // benchmark_seq_vs_parallel(1000, 20);
-        // benchmark_head_to_head(1000, 10);
-        // benchmark_thread_scaling(1000, 5);
+        benchmark_seq_vs_parallel(1000, 20);
+        benchmark_head_to_head(1000, 10);
+        benchmark_thread_scaling(1000, 5);
         benchmark_simulation_scaling(20);
     } else if (argc > 1 && strcmp(argv[1], "full") == 0) {
         printf("\n[FULL MODE - Comprehensive testing]\n");
@@ -406,11 +406,6 @@ int main(int argc, char *argv[]) {
     printf("\n╔════════════════════════════════════════════════╗\n");
     printf("║  Benchmark Complete!                           ║\n");
     printf("╚════════════════════════════════════════════════╝\n");
-    printf("\nKey Takeaways:\n");
-    printf("• Parallel should maintain similar win rates to sequential\n");
-    printf("• Expect 2-8x speedup depending on CPU cores\n");
-    printf("• Thread scaling shows parallel efficiency\n");
-    printf("• More simulations = better decisions but slower\n");
     
     return 0;
 }

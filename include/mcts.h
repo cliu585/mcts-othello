@@ -28,8 +28,13 @@ double simulate(GameState *state, int original_player, unsigned int *seed, int i
 
 void backpropagate(Node *node, double result);
 
-void mcts_sequential(Node *root, int iterations);
+MCTSTiming mcts_sequential(Node *root, int iterations);
 
 void free_tree(Node *node);
+
+void init_timing_aggregator(MCTSTimingAggregator *agg);
+void add_timing(MCTSTimingAggregator *agg, const MCTSTiming *timing);
+MCTSTiming get_average_timing(const MCTSTimingAggregator *agg);
+void print_timing(const MCTSTiming *timing, int iterations, const char *label);
 
 #endif

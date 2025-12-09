@@ -10,7 +10,7 @@ Node* clone_node(Node *original, Node *new_parent) {
     clone->state = original->state;
     clone->move_row = original->move_row;
     clone->move_col = original->move_col;
-    clone->visits = 0;  // Start fresh for each thread
+    clone->visits = 0;
     clone->wins = 0.0;
     clone->parent = new_parent;
     clone->player_just_moved = original->player_just_moved;
@@ -19,7 +19,6 @@ Node* clone_node(Node *original, Node *new_parent) {
 
     return clone;
 }
-
 
 static inline double atomic_load_int(volatile int *p) {
     int v;
@@ -69,28 +68,42 @@ int select_child_index_parallel(Node *parent)
     return best_idx;
 }
 
-// Standard MCTS iteration 
-void mcts_iteration(Node *root, unsigned int *seed) {
+IterationTiming mcts_iteration(Node *root, unsigned int *seed) {
+    IterationTiming timing = {0.0, 0.0, 0.0, 0.0};
     Node *node = root;
 
     // Selection
+    double sel_start = omp_get_wtime();
     while (node->num_children > 0) {
         node = select_child(node);
     }
+    double sel_end = omp_get_wtime();
+    timing.selection = sel_end - sel_start;
 
     // Expansion
+    double exp_start = omp_get_wtime();
     if (node->visits > 0 && has_valid_moves(&node->state)) {
         expand(node);
         if (node->num_children > 0) {
             node = node->children[rand_r(seed) % node->num_children];
         }
     }
+    double exp_end = omp_get_wtime();
+    timing.expansion = exp_end - exp_start;
 
     // Simulation
+    double sim_start = omp_get_wtime();
     double result = simulate(&node->state, node->state.player, seed, 1);
+    double sim_end = omp_get_wtime();
+    timing.simulation = sim_end - sim_start;
 
     // Backpropagation
+    double back_start = omp_get_wtime();
     backpropagate(node, result);
+    double back_end = omp_get_wtime();
+    timing.backpropagation = back_end - back_start;
+    
+    return timing;
 }
 
 void expand_parallel(Node *node) {
@@ -118,22 +131,31 @@ void expand_parallel(Node *node) {
                     create_node(&new_state, i, j, node);
             }
 
-    // Now publish them atomically under the struct lock
     node->children = new_children;
     node->num_children = count;
 }
 
-// Root parallelization: Each thread builds its own independent tree from root,
-// then we merge statistics to select the best move
-void mcts_root_parallel(Node *root, int total_iterations) {
-    if (root == NULL) return;
+
+MCTSTiming mcts_root_parallel(Node *root, int total_iterations) {
+    MCTSTiming timing = {0.0, 0.0, 0.0, 0.0, 0.0};
+    
+    if (root == NULL) return timing;
+
+    double total_start = omp_get_wtime();
 
     int num_threads = omp_get_max_threads();
     int iters_per_thread = total_iterations / num_threads;
 
     // Create thread-local root copies
     Node **thread_roots = malloc(num_threads * sizeof(Node*));
+    
+    // Arrays to accumulate timing from each thread
+    double *sel_times = calloc(num_threads, sizeof(double));
+    double *exp_times = calloc(num_threads, sizeof(double));
+    double *sim_times = calloc(num_threads, sizeof(double));
+    double *back_times = calloc(num_threads, sizeof(double));
 
+    double parallel_start = omp_get_wtime();
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
@@ -144,11 +166,33 @@ void mcts_root_parallel(Node *root, int total_iterations) {
 
         // Run MCTS iterations on thread-local tree
         for (int i = 0; i < iters_per_thread; i++) {
-            mcts_iteration(thread_roots[tid], &seed);
+            IterationTiming iter_timing = mcts_iteration(thread_roots[tid], &seed);
+            sel_times[tid] += iter_timing.selection;
+            exp_times[tid] += iter_timing.expansion;
+            sim_times[tid] += iter_timing.simulation;
+            back_times[tid] += iter_timing.backpropagation;
+        }
+    }
+    double parallel_end = omp_get_wtime();
+
+    // Aggregate timing across all threads
+    for (int t = 0; t < num_threads; t++) {
+        timing.selection += sel_times[t];
+        timing.expansion += exp_times[t];
+        timing.simulation += sim_times[t];
+        timing.backpropagation += back_times[t];
+    }
+
+    int need_expand = (root->num_children == 0);
+    for (int t = 0; t < num_threads && need_expand; t++) {
+        if (thread_roots[t]->num_children > 0) {
+            expand(root);
+            break;
         }
     }
 
     // Merge results: aggregate statistics from all thread-local roots
+    double merge_start = omp_get_wtime();
     for (int t = 0; t < num_threads; t++) {
         Node *thread_root = thread_roots[t];
 
@@ -176,14 +220,31 @@ void mcts_root_parallel(Node *root, int total_iterations) {
         }
         free_tree(thread_root);
     }
+    double merge_end = omp_get_wtime();
 
     free(thread_roots);
+    free(sel_times);
+    free(exp_times);
+    free(sim_times);
+    free(back_times);
+
+    double total_end = omp_get_wtime();
+    timing.total = total_end - total_start;
+    
+    return timing;
 }
 
-void mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
-    if (root == NULL || total_iterations <= 0) return;
+MCTSTiming mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
+    MCTSTiming timing = {0.0, 0.0, 0.0, 0.0, 0.0};
+    
+    if (root == NULL || total_iterations <= 0) return timing;
 
-    #pragma omp parallel
+    double total_start = omp_get_wtime();
+
+    // We'll track cumulative times across all threads
+    double sel_time = 0.0, exp_time = 0.0, sim_time = 0.0, back_time = 0.0;
+
+    #pragma omp parallel reduction(+:sel_time,exp_time,sim_time,back_time)
     {
         unsigned int seed = (unsigned int)time(NULL) ^ (unsigned int)omp_get_thread_num() ^ 0x9e3779b9u;
 
@@ -194,6 +255,8 @@ void mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
 
             Node *node = root;
 
+            // Selection phase
+            double sel_start = omp_get_wtime();
             int depth = 0;
             while (1) {
                 if (depth++ > 2000) { printf("Stuck!\n"); break; }
@@ -226,7 +289,11 @@ void mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
 
                 if (node == NULL) break;
             }
+            double sel_end = omp_get_wtime();
+            sel_time += (sel_end - sel_start);
 
+            // Expansion phase
+            double exp_start = omp_get_wtime();
             if (has_valid_moves(&node->state)) {
                 omp_set_lock(&node->lock);
 
@@ -250,9 +317,17 @@ void mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
                     node->wins -= VIRTUAL_LOSS;
                 }
             }
+            double exp_end = omp_get_wtime();
+            exp_time += (exp_end - exp_start);
 
+            // Simulation phase
+            double sim_start = omp_get_wtime();
             double result = simulate(&node->state, node->state.player, &seed, 1);
+            double sim_end = omp_get_wtime();
+            sim_time += (sim_end - sim_start);
 
+            // Backpropagation phase
+            double back_start = omp_get_wtime();
             int original_player = path[path_len - 1]->state.player; 
             for (int p = 0; p < path_len; ++p) {
                 Node *n = path[p];
@@ -267,6 +342,19 @@ void mcts_root_parallel_virtual_loss(Node *root, int total_iterations) {
                 #pragma omp atomic
                 n->wins += wins_inc;
             }
+            double back_end = omp_get_wtime();
+            back_time += (back_end - back_start);
         } 
-    } 
+    }
+    
+    timing.selection = sel_time;
+    timing.expansion = exp_time;
+    timing.simulation = sim_time;
+    timing.backpropagation = back_time;
+    
+    double total_end = omp_get_wtime();
+    timing.total = total_end - total_start;
+    
+    return timing;
 }
+

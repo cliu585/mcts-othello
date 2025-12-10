@@ -4,10 +4,15 @@
 #include <time.h>
 #include <math.h>
 #include <omp.h>
-#include "include/mcts.h"
-#include "othello.h"
+
 #include "mcts.h"
 
+typedef enum {
+    MCTS_SEQUENTIAL,
+    MCTS_LEAF_PARALLEL,
+    MCTS_ROOT_PARALLEL,
+    MCTS_ROOT_PARALLEL_VIRTUAL_LOSS
+} MCTSMode;
 
 const char* mode_names[] = {
     "Sequential",
@@ -15,6 +20,15 @@ const char* mode_names[] = {
     "Root Parallel",
     "Root Parallel + Virtual Loss"
 };
+
+typedef struct {
+    int wins;
+    int losses;
+    int draws;
+    double total_time;
+    int move_count;
+    MCTSTimingAggregator agg;
+} ModeStats;
 
 int get_random_move(GameState *state, int *r, int *c) {
     int board_size = SIZE * SIZE;
@@ -64,7 +78,6 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c,
             break;
     }
 
-    // Copy timing data if requested
     if (timing_out != NULL) {
         *timing_out = timing;
     }
@@ -85,22 +98,14 @@ int get_mcts_move(GameState *state, int simulations, int *r, int *c,
         *r = best->move_row;
         *c = best->move_col;
     }
-
+    free_tree(root);
     return best != NULL;
 }
 
-// Benchmark 1: All Modes vs Random Player
+// Benchmark 1: All modes vs random player
 void benchmark_all_modes_vs_random(int mcts_sims, int num_games) {
     printf("\n=== Benchmark 1: All MCTS Modes vs Random Player (%d sims, %d games) ===\n", 
            mcts_sims, num_games);
-
-    typedef struct {
-        int wins;
-        int draws;
-        double total_time;
-        int move_count;
-        MCTSTimingAggregator agg;
-    } ModeStats;
 
     ModeStats stats[4];
     
@@ -156,12 +161,12 @@ void benchmark_all_modes_vs_random(int mcts_sims, int num_games) {
         print_timing(&avg, 1000, mode_names[mode]);
     }
     
-    // Compare Results
+    // Compare results
     printf("\n╔════════════════════════════════════════════════════════════════════╗\n");
     printf("║                    PERFORMANCE COMPARISON                          ║\n");
     printf("╚════════════════════════════════════════════════════════════════════╝\n");
     
-    printf("\n%-30s | %8s | %8s | %8s | %12s | %10s\n",
+    printf("%-30s | %8s | %8s | %8s | %12s | %10s\n",
            "Mode", "Wins", "Draws", "Losses", "Win Rate", "Time/Move");
     printf("-------------------------------|----------|----------|----------|--------------|------------\n");
     
@@ -172,7 +177,7 @@ void benchmark_all_modes_vs_random(int mcts_sims, int num_games) {
         double win_rate = 100.0 * stats[mode].wins / num_games;
         double avg_time = stats[mode].total_time / stats[mode].move_count;
         
-        printf("%-30s | %3d/%3d | %3d/%3d | %3d/%3d | %10.1f%% | %8.4f s\n",
+        printf("%-30s | %4d/%3d | %4d/%3d | %4d/%3d | %11f%% | %10f s\n",
                mode_names[mode],
                stats[mode].wins, num_games,
                stats[mode].draws, num_games,
@@ -189,134 +194,143 @@ void benchmark_all_modes_vs_random(int mcts_sims, int num_games) {
     }
 }
 
-// Benchmark 2: Head-to-Head All Modes
+// Benchmark 2: head-to-head all modes
 void benchmark_head_to_head_all_modes(int simulations, int num_games) {
     printf("\n=== Benchmark 2: Head-to-Head All Modes (%d sims, %d games each matchup) ===\n",
            simulations, num_games);
-    
+
     typedef struct {
-        int wins;
-        int losses;
+        int mode1_wins;
+        int mode2_wins;
         int draws;
-        double total_time;
-        int move_count;
-        MCTSTimingAggregator agg;
+        double mode1_total_time;
+        double mode2_total_time;
+        int mode1_move_count;
+        int mode2_move_count;
+        MCTSTimingAggregator mode1_agg;
+        MCTSTimingAggregator mode2_agg;
     } MatchupStats;
-    
+
     MatchupStats matchups[4][4];
-    
+
     // Initialize stats
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {
-            matchups[i][j].wins = 0;
-            matchups[i][j].losses = 0;
+            matchups[i][j].mode1_wins = 0;
+            matchups[i][j].mode2_wins = 0;
             matchups[i][j].draws = 0;
-            matchups[i][j].total_time = 0.0;
-            matchups[i][j].move_count = 0;
-            init_timing_aggregator(&matchups[i][j].agg);
+            matchups[i][j].mode1_total_time = 0.0;
+            matchups[i][j].mode2_total_time = 0.0;
+            matchups[i][j].mode1_move_count = 0;
+            matchups[i][j].mode2_move_count = 0;
+            init_timing_aggregator(&matchups[i][j].mode1_agg);
+            init_timing_aggregator(&matchups[i][j].mode2_agg);
         }
     }
-    
+
     // Run matchups (only upper triangle to avoid duplicates)
     for (int mode1 = 0; mode1 < 4; mode1++) {
         for (int mode2 = mode1 + 1; mode2 < 4; mode2++) {
             printf("\nTesting %s vs %s...\n", mode_names[mode1], mode_names[mode2]);
-            
+
             for (int game = 0; game < num_games; game++) {
                 GameState state;
                 init_board(&state);
-                
+
                 int player1 = (game % 2 == 0) ? BLACK : WHITE;
                 int player2 = opponent(player1);
-                
+
                 while (1) {
                     if (!has_valid_moves(&state)) {
                         state.player = opponent(state.player);
                         if (!has_valid_moves(&state)) break;
                     }
-                    
+
                     int r, c;
                     MCTSTiming timing;
                     double start = omp_get_wtime();
-                    
+
                     if (state.player == player1) {
+                        // CRITICAL: Ensure threads from previous move are done
+                        #pragma omp barrier
+                        
                         int res = get_mcts_move(&state, simulations, &r, &c, mode1, &timing);
-                        add_timing(&matchups[mode1][mode2].agg, &timing);
+                        add_timing(&matchups[mode1][mode2].mode1_agg, &timing);
                         if (!res) break;
-                        matchups[mode1][mode2].total_time += (omp_get_wtime() - start);
-                        matchups[mode1][mode2].move_count++;
+                        matchups[mode1][mode2].mode1_total_time += (omp_get_wtime() - start);
+                        matchups[mode1][mode2].mode1_move_count++;
                     } else {
+                        // CRITICAL: Ensure threads from previous move are done
+                        #pragma omp barrier
+                        
                         int res = get_mcts_move(&state, simulations, &r, &c, mode2, &timing);
-                        add_timing(&matchups[mode2][mode1].agg, &timing);
+                        add_timing(&matchups[mode1][mode2].mode2_agg, &timing);
                         if (!res) break;
-                        matchups[mode2][mode1].total_time += (omp_get_wtime() - start);
-                        matchups[mode2][mode1].move_count++;
+                        matchups[mode1][mode2].mode2_total_time += (omp_get_wtime() - start);
+                        matchups[mode1][mode2].mode2_move_count++;
                     }
-                    
+
                     make_move(&state, r, c);
                 }
-                
+
                 int winner = get_winner(&state);
                 if (winner == player1) {
-                    matchups[mode1][mode2].wins++;
-                    matchups[mode2][mode1].losses++;
+                    matchups[mode1][mode2].mode1_wins++;
                 } else if (winner == player2) {
-                    matchups[mode1][mode2].losses++;
-                    matchups[mode2][mode1].wins++;
+                    matchups[mode1][mode2].mode2_wins++;
                 } else {
                     matchups[mode1][mode2].draws++;
-                    matchups[mode2][mode1].draws++;
                 }
             }
-            
-            printf("  %s: %d-%d-%d (W-L-D)\n", 
+
+            printf("  %s: %d-%d-%d (W-L-D)\n",
                    mode_names[mode1],
-                   matchups[mode1][mode2].wins,
-                   matchups[mode1][mode2].losses,
+                   matchups[mode1][mode2].mode1_wins,
+                   matchups[mode1][mode2].mode2_wins,
                    matchups[mode1][mode2].draws);
             printf("  %s: %d-%d-%d (W-L-D)\n",
                    mode_names[mode2],
-                   matchups[mode2][mode1].wins,
-                   matchups[mode2][mode1].losses,
-                   matchups[mode2][mode1].draws);
+                   matchups[mode1][mode2].mode2_wins,
+                   matchups[mode1][mode2].mode1_wins,
+                   matchups[mode1][mode2].draws);
         }
     }
-    
+
     printf("\n╔════════════════════════════════════════════════════════════════════╗\n");
     printf("║                    HEAD-TO-HEAD RESULTS                            ║\n");
     printf("╚════════════════════════════════════════════════════════════════════╝\n");
-    
+
     for (int mode1 = 0; mode1 < 4; mode1++) {
         for (int mode2 = mode1 + 1; mode2 < 4; mode2++) {
             printf("\n%s vs %s:\n", mode_names[mode1], mode_names[mode2]);
             printf("  %s: %d wins, %d losses, %d draws (%.1f%% win rate)\n",
                    mode_names[mode1],
-                   matchups[mode1][mode2].wins,
-                   matchups[mode1][mode2].losses,
+                   matchups[mode1][mode2].mode1_wins,
+                   matchups[mode1][mode2].mode2_wins,
                    matchups[mode1][mode2].draws,
-                   100.0 * matchups[mode1][mode2].wins / num_games);
+                   100.0 * matchups[mode1][mode2].mode1_wins / num_games);
             printf("  %s: %d wins, %d losses, %d draws (%.1f%% win rate)\n",
                    mode_names[mode2],
-                   matchups[mode2][mode1].wins,
-                   matchups[mode2][mode1].losses,
-                   matchups[mode2][mode1].draws,
-                   100.0 * matchups[mode2][mode1].wins / num_games);
-            
-            if (matchups[mode1][mode2].move_count > 0) {
+                   matchups[mode1][mode2].mode2_wins,
+                   matchups[mode1][mode2].mode1_wins,
+                   matchups[mode1][mode2].draws,
+                   100.0 * matchups[mode1][mode2].mode2_wins / num_games);
+
+            if (matchups[mode1][mode2].mode1_move_count > 0) {
                 printf("  %s avg time: %.4f s/move\n",
                        mode_names[mode1],
-                       matchups[mode1][mode2].total_time / matchups[mode1][mode2].move_count);
+                       matchups[mode1][mode2].mode1_total_time / matchups[mode1][mode2].mode1_move_count);
             }
-            if (matchups[mode2][mode1].move_count > 0) {
+            if (matchups[mode1][mode2].mode2_move_count > 0) {
                 printf("  %s avg time: %.4f s/move\n",
                        mode_names[mode2],
-                       matchups[mode2][mode1].total_time / matchups[mode2][mode1].move_count);
+                       matchups[mode1][mode2].mode2_total_time / matchups[mode1][mode2].mode2_move_count);
             }
         }
     }
 }
 
-// Benchmark 3: Thread Scaling for Parallel Modes
+// Benchmark 3: thread scaling for parallel modes
 void benchmark_thread_scaling(int simulations, int num_games) {
     printf("\n=== Benchmark 3: Thread Scaling for Parallel Modes (%d sims, %d games) ===\n",
            simulations, num_games);
@@ -377,7 +391,7 @@ void benchmark_thread_scaling(int simulations, int num_games) {
     }
 }
 
-// Benchmark 4: Simulation Scaling for All Modes
+// Benchmark 4: simulation scaling for all modes
 void benchmark_simulation_scaling(int num_games) {
     printf("\n=== Benchmark 4: Simulation Scaling All Modes (%d games each) ===\n", num_games);
 
@@ -466,10 +480,8 @@ int main(int argc, char *argv[]) {
     srand(time(NULL));
     
     printf("╔════════════════════════════════════════════════╗\n");
-    printf("║  Othello MCTS: All Modes Comparison           ║\n");
+    printf("║  Othello MCTS: All Modes Comparison            ║\n");
     printf("╚════════════════════════════════════════════════╝\n");
-    printf("\nSystem Info:\n");
-    printf("  Max OpenMP Threads: %d\n", omp_get_max_threads());
     printf("\nModes tested:\n");
     for (int i = 0; i < 4; i++) {
         printf("  %d. %s\n", i, mode_names[i]);

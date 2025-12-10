@@ -3,14 +3,6 @@
 int dx[] = {-1, -1, -1, 0, 0, 1, 1, 1};
 int dy[] = {-1, 0, 1, -1, 1, -1, 0, 1};
 
-int is_valid(int r, int c) {
-    return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
-}
-
-int opponent(int player) {
-    return player == BLACK ? WHITE : BLACK;
-}
-
 void init_board(GameState *state) {
     memset(state->board, EMPTY, sizeof(state->board));
     state->board[3][3] = WHITE;
@@ -18,6 +10,14 @@ void init_board(GameState *state) {
     state->board[4][3] = BLACK;
     state->board[4][4] = WHITE;
     state->player = BLACK;
+}
+
+int is_valid(int r, int c) {
+    return r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+}
+
+int opponent(int player) {
+    return player == BLACK ? WHITE : BLACK;
 }
 
 int is_valid_move(GameState *state, int r, int c) {
@@ -38,6 +38,14 @@ int is_valid_move(GameState *state, int r, int c) {
         if (found_opp && is_valid(nr, nc) && state->board[nr][nc] == state->player)
             return 1;
     }
+    return 0;
+}
+
+int has_valid_moves(GameState *state) {
+    for (int i = 0; i < SIZE; i++)
+        for (int j = 0; j < SIZE; j++)
+            if (is_valid_move(state, i, j))
+                return 1;
     return 0;
 }
 
@@ -68,14 +76,6 @@ void make_move(GameState *state, int r, int c) {
     state->player = opp;
 }
 
-int has_valid_moves(GameState *state) {
-    for (int i = 0; i < SIZE; i++)
-        for (int j = 0; j < SIZE; j++)
-            if (is_valid_move(state, i, j))
-                return 1;
-    return 0;
-}
-
 void get_score(GameState *state, int *black, int *white) {
     *black = 0;
     *white = 0;
@@ -93,17 +93,18 @@ int get_winner(GameState *state) {
     return black > white ? BLACK : (white > black ? WHITE : 0);
 }
 
-Node* create_node(GameState *state, int r, int c, Node *parent) {
-    Node *node = malloc(sizeof(Node));
-    node->state = *state;
-    node->move_row = r;
-    node->move_col = c;
-    node->visits = 0;
-    node->wins = 0.0;
-    node->parent = parent;
-    node->children = NULL;
-    node->num_children = 0;
-    node->player_just_moved = parent ? opponent(state->player) : BLACK;
-    omp_init_lock(&node->lock);
-    return node;
+GameState* clone_game_state(const GameState* original) {
+    if (original == NULL) {
+        return NULL;
+    }
+    
+    GameState* clone = (GameState*)malloc(sizeof(GameState));
+    if (clone == NULL) {
+        return NULL;  // Memory allocation failed
+    }
+    
+    memcpy(clone->board, original->board, sizeof(original->board));
+    clone->player = original->player;
+    
+    return clone;
 }

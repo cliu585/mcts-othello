@@ -9,11 +9,11 @@ INC_DIR = include
 OBJ_DIR = obj
 
 # Source files
-SOURCES = $(SRC_DIR)/othello.c $(SRC_DIR)/mcts.c $(SRC_DIR)/mcts_leaf.c $(SRC_DIR)/mcts_root.c benchmark.c
-OBJECTS = $(OBJ_DIR)/othello.o $(OBJ_DIR)/mcts.o $(OBJ_DIR)/mcts_leaf.o $(OBJ_DIR)/mcts_root.o $(OBJ_DIR)/benchmark.o
+SOURCES = $(SRC_DIR)/othello.c $(SRC_DIR)/mcts.c $(SRC_DIR)/mcts_leaf.c $(SRC_DIR)/mcts_root.c $(SRC_DIR)/mcts_util.c benchmark.c
+OBJECTS = $(OBJ_DIR)/othello.o $(OBJ_DIR)/mcts.o $(OBJ_DIR)/mcts_leaf.o $(OBJ_DIR)/mcts_root.o $(SRC_DIR)/mcts_util.o $(OBJ_DIR)/benchmark.o
 
 # Headers
-HEADERS = $(INC_DIR)/othello.h $(INC_DIR)/mcts.h $(INC_DIR)/mcts_leaf.h $(INC_DIR)/mcts_root.h
+HEADERS = $(INC_DIR)/othello.h $(INC_DIR)/mcts.h $(INC_DIR)/mcts_leaf.h $(INC_DIR)/mcts_root.h $(INC_DIR)/mcts_util.h
 
 # Target executable
 TARGET = benchmark

@@ -1,9 +1,6 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <time.h>
 #include "mcts.h"
 
+// UCB1 node selection logic
 double ucb1(Node *node) {
     if (node->visits == 0) return INFINITY;
     double exploitation = node->wins / node->visits;
@@ -11,6 +8,7 @@ double ucb1(Node *node) {
     return exploitation + exploration;
 }
 
+// MCTS selection phase
 Node* select_child(Node *node) {
     Node *best = NULL;
     double best_ucb = -INFINITY;
@@ -24,6 +22,7 @@ Node* select_child(Node *node) {
     return best;
 }
 
+// MCTS expansion phase
 void expand(Node *node) {
     GameState *state = &node->state;
     int count = 0;
@@ -46,6 +45,7 @@ void expand(Node *node) {
     }
 }
 
+// MCTS simulation phase
 double simulate(GameState *state, int original_player, unsigned int *seed, int include_seed) {
     GameState sim = *state;
     while (1) {
@@ -89,20 +89,18 @@ double simulate(GameState *state, int original_player, unsigned int *seed, int i
     }
 }
 
+// MCTS backpropagation approach
 void backpropagate(Node *node, double result) {
-    // Start from the leaf where simulation was run
     int sim_player = node->state.player;
     while (node != NULL) {
         node->visits++;
-        if (node->player_just_moved == sim_player) {
-            node->wins += result;
-        } else {
-            node->wins += (1.0 - result);
-        }
+        if (node->player_just_moved == sim_player) node->wins += result;
+        else node->wins += (1.0 - result);
         node = node->parent;
     }
 }
 
+// MCTS sequential approach
 MCTSTiming mcts_sequential(Node *root, int iterations) {
     MCTSTiming timing = {0};
 
@@ -144,71 +142,5 @@ MCTSTiming mcts_sequential(Node *root, int iterations) {
     }
 
     timing.total = timing.selection + timing.expansion + timing.simulation + timing.backpropagation;
-    
     return timing;
-}
-
-// Initialize aggregator
-void init_timing_aggregator(MCTSTimingAggregator *agg) {
-    agg->total_selection = 0.0;
-    agg->total_expansion = 0.0;
-    agg->total_simulation = 0.0;
-    agg->total_backpropagation = 0.0;
-    agg->num_runs = 0;
-}
-
-// Add timing to aggregator
-void add_timing(MCTSTimingAggregator *agg, const MCTSTiming *timing) {
-    agg->total_selection += timing->selection;
-    agg->total_expansion += timing->expansion;
-    agg->total_simulation += timing->simulation;
-    agg->total_backpropagation += timing->backpropagation;
-    agg->num_runs++;
-}
-
-// Get average timing
-MCTSTiming get_average_timing(const MCTSTimingAggregator *agg) {
-    MCTSTiming avg = {0};
-    if (agg->num_runs > 0) {
-        avg.selection = agg->total_selection / agg->num_runs;
-        avg.expansion = agg->total_expansion / agg->num_runs;
-        avg.simulation = agg->total_simulation / agg->num_runs;
-        avg.backpropagation = agg->total_backpropagation / agg->num_runs;
-        avg.total = avg.selection + avg.expansion + avg.simulation + avg.backpropagation;
-    }
-    return avg;
-}
-
-// Print timing statistics
-void print_timing(const MCTSTiming *timing, int iterations, const char *label) {
-    printf("\n=== MCTS Phase Timing: %s (%d iterations) ===\n", label, iterations);
-    printf("Selection:       %.6f s (%.2f%%)\n", timing->selection, 
-           100.0 * timing->selection / timing->total);
-    printf("Expansion:       %.6f s (%.2f%%)\n", timing->expansion, 
-           100.0 * timing->expansion / timing->total);
-    printf("Simulation:      %.6f s (%.2f%%)\n", timing->simulation, 
-           100.0 * timing->simulation / timing->total);
-    printf("Backpropagation: %.6f s (%.2f%%)\n", timing->backpropagation, 
-           100.0 * timing->backpropagation / timing->total);
-    printf("Total:           %.6f s\n", timing->total);
-    printf("=================================================\n\n");
-}
-
-// void free_node_state(Node *node) {
-//     if (node->state.board != NULL) {
-//         for (int i = 0; i < node->state.size; i++) {
-//             free(node->state.board[i]);
-//         }
-//         free(node->state.board);
-//         node->state.board = NULL;
-//     }
-// }
-
-// Helper function to free a tree
-void free_tree(Node *node) {
-    if (node == NULL) return;
-    for (int i = 0; i < node->num_children; i++)
-        free_tree(node->children[i]);
-    free(node->children);
-    free(node);
 }
